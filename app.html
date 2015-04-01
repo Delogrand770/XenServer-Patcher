@@ -1,0 +1,719 @@
+<!--
+Created by 2Lt Gavin Delphia in 2014 - 2015
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<title>XenServer Patcher</title>
+
+<link href="bootstrap/css/bootstrap.css" rel="stylesheet">
+
+<style>
+body{
+	margin: 5px;
+}
+div {
+	border: 0px solid;
+}
+</style>
+
+
+<script src="js/xmlToJSON.js"></script><!-- Library to convert XML to JSON -->
+<script src="js/json.js"></script><!-- Library to parse JSON -->
+<script src="js/settings.js"></script><!-- Default settings for the program -->
+
+<script>
+var patcher = {
+	note: "", //Used for development to keep track of next feature to implement
+	queue: null, //Commands to execute
+	credentials: null, //Credentials to access  the XenServer
+	xmlDoc: null, //XML Request document
+	json: null, //Converted JSON document with all the update data
+	step: null, //Which step in the program are we at
+	patches: null, //The list of patches for the specified XenServer version
+	ver: null, //The version of the XenServer specified
+	dest: null, //The location to save patches to
+	buffer: "", //Stores responses from command execution for parsing
+	queueData: {total:0, current:0, unzipneeded: []}, //Keeps track of progress in the command list
+	ini:function(){
+		console.log(patcher.note);
+
+		document.getElementById('serverIP').value = settings.ip || "";
+		document.getElementById('serverUser').value = settings.user || "";
+		document.getElementById('serverPassword').value = settings.password || "";
+		document.getElementById('serverPort').value = settings.port || "";
+		document.getElementById('patchrepo').value = settings.patchsavedir || "";
+
+		patcher.queue = [];
+		patcher.step = "stage1";
+		patcher.credentials = {user: null, pass: null, ip: null, port: null, string: null};
+		patcher.statusChange("status", "<b>Welcome</b><br> Please enter your XenServer credentials", "clear");
+	},
+	/*
+	Back button implementation
+	*/
+	prevTask:function(){
+		if (patcher.step == "stage2"){
+			patcher.step = "stage1";
+			patcher.statusChange("status", "<b>Welcome</b><br> Please enter your XenServer credentials", "clear");
+			document.getElementById("well_stage2").style.display = "none";
+			document.getElementById("well_stage1").style.display = "block";
+			document.getElementById("credits").style.display = "block";
+		} else if (patcher.step == "stage3"){
+			patcher.step = "stage2";
+			document.getElementById("well_stage3").style.display = "none";
+			document.getElementById("well_stage2").style.display = "block";
+			document.getElementById("stages").style.display = "block";
+		} else if (patcher.step == "stage4"){
+			patcher.step = "stage3";
+			document.getElementById("stages").style.display = "none";
+			document.getElementById("well_stage4").style.display = "none";
+			document.getElementById("well_stage3").style.display = "block";
+		}
+	},
+	/*
+	Next button implementation. Each part of the program is broken into stages of tasks.
+	*/
+	nextTask:function(){
+		if (patcher.step == "stage1"){
+			if (patcher.validateCredentials()){
+				patcher.statusChange("status", "<br><br><b>Performing initial checks:</b>");
+				patcher.statusChange("status", "<br>Downloading update file.....");
+
+				//Download update file
+				patcher.xmlDoc = new XMLHttpRequest();
+				patcher.xmlDoc.onreadystatechange = patcher.processDownload;
+				patcher.xmlDoc.open("GET", settings.updatefile, true);
+				patcher.xmlDoc.send();
+			}
+		} else if (patcher.step == "stage1b"){
+			patcher.testServer();
+		} else if (patcher.step == "stage2"){
+			var index = document.getElementById("version").value;
+			patcher.getVersionUUIDs(index);
+		} else if (patcher.step == "stage3"){
+			patcher.statusChange("status", "<br><br><b>Please specify a patch download location:</b>");
+			document.getElementById('well_stage3').style.display = "none";			
+			document.getElementById('well_stage4').style.display = "block";
+			document.getElementById('stages').style.display = "block";
+			patcher.step = "stage4";
+		} else if (patcher.step == "stage4"){
+			var location = document.getElementById('patchrepo').value;
+			patcher.statusChange("status", '<br>"' + location + '" .....');
+
+			var fs = require('fs');
+			try{
+				var stats = fs.lstatSync(location);
+				if (stats.isDirectory()) {
+					patcher.dest = location;
+				}
+			} catch (e){
+				patcher.statusChange("status", 'Unreachable', 'failure');
+				patcher.statusChange("status", '<br>');
+				return;
+			}
+
+			patcher.statusChange("status", 'Exists', 'success');
+			document.getElementById('queue_title').innerHTML = "Downloading Patch";
+			document.getElementById("progress_status").innerHTML = "";
+			document.getElementById('well_stage4').style.display = "none";	
+			document.getElementById('well_stage5').style.display = "block";
+			//document.getElementById('well_io').style.display = "block";
+
+			patcher.resetProgress('progressbar');
+			patcher.queueDownloads();
+			patcher.queueData.current = 0;
+			patcher.queueData.total = patcher.queue.length;
+			patcher.step = "stage5";
+			patcher.runQueueCommands();
+		} else if (patcher.step == "stage5"){
+			document.getElementById('queue_title').innerHTML = "Extracting New/Updated Patch";
+			document.getElementById("progress_status").innerHTML = "";
+
+			patcher.queueUnarchive();
+			patcher.resetProgress('progressbar');
+			patcher.queueData.current = 0;
+			patcher.queueData.total = patcher.queue.length;
+			patcher.step = "stage6";
+			patcher.runQueueCommands();
+		} else if (patcher.step == "stage6"){
+			document.getElementById('queue_title').innerHTML = "Uploading Patch";
+			document.getElementById("progress_status").innerHTML = "";
+
+			patcher.queuePatchUpload();
+			patcher.resetProgress('progressbar');
+			patcher.queueData.current = 0;
+			patcher.queueData.total = patcher.queue.length;
+			patcher.step = "stage7";
+			patcher.runQueueCommands();
+		} else if (patcher.step == "stage7"){
+			document.getElementById('queue_title').innerHTML = "Installing Patch";
+			document.getElementById("progress_status").innerHTML = "";
+
+			patcher.queuePatchInstall();
+			patcher.resetProgress('progressbar');
+			patcher.queueData.current = 0;
+			patcher.queueData.total = patcher.queue.length;
+			patcher.step = "stage8";
+			patcher.runQueueCommands();
+		} else if (patcher.step == "stage8"){
+			document.getElementById('queue_title').innerHTML = "Verifying Patch Install";
+			document.getElementById("progress_status").innerHTML = "";
+
+			patcher.queuePatchVerify();
+			patcher.resetProgress('progressbar');
+			patcher.queueData.current = 0;
+			patcher.queueData.total = patcher.queue.length;
+			patcher.step = "stage9";
+		} else if (patcher.step == "stage9"){
+			var data = document.getElementById('iostatus').value;
+
+			patcher.writeFile("log.txt", data);
+			patcher.step = "stage10";
+		}
+	},
+	/*
+	Verifies a ip, username, password and port are provided. Does not do format checking of validity checking.
+	*/
+	validateCredentials:function(){
+		var ip = document.getElementById('serverIP').value;
+		var user = document.getElementById('serverUser').value;
+		var pass = document.getElementById('serverPassword').value;
+		var port = document.getElementById('serverPort').value;
+
+		if (!ip || !user || !pass || !port){
+			return false;
+		} else {
+			patcher.credentials = {user: user, pass: pass, ip: ip, port:port, string: null}
+			patcher.credentials.string = '-s ' + patcher.credentials.ip + ' -u ' + patcher.credentials.user + ' -pw ' + patcher.credentials.pass + ' -p ' + patcher.credentials.port;
+			//console.log(patcher.credentials);
+			return true;
+		}
+	},
+	/*
+	Triggers when the xmlHttpRequest responds. Converts the XML to JSON and parses the JSON
+	*/
+	processDownload: function(){
+		if (patcher.xmlDoc.readyState == 4 && patcher.xmlDoc.status == 200){
+			patcher.statusChange("status", '', 'success');
+			patcher.statusChange("status", "<br>Parsing update file.....");
+
+			try{
+				patcher.json = xmlToJson(patcher.xmlDoc.responseXML);
+				var jsonText = JSON.stringify(patcher.json, null, '\t');
+				patcher.json = JSON.parse(jsonText);	
+				patcher.buildMenu("version", patcher.json.patchdata.serverversions.version);			
+			} catch (e){
+				patcher.statusChange("status", '', 'failure');
+				return;
+			}
+
+			patcher.statusChange("status", '', 'success');
+			patcher.step = "stage1b";
+			document.getElementById("credits").style.display = "none";
+			patcher.nextTask();
+		} else if (patcher.xmlDoc.readyState == 4 && patcher.xmlDoc.status != 200){
+			patcher.statusChange("status", '', 'failure');
+		}
+	},
+	/*
+	Used to write status messages to any div in the program.
+	*/
+	statusChange:function(ele, data, action){
+		var ele = document.getElementById(ele);
+
+		if (action == "clear"){
+			ele.innerHTML = "";
+		}
+
+		if (action == "success"){
+			data = (data == '') ? "Success" : data;
+			data = '<font style="color:#00cc00;font-weight:bold;">' + data + '</font>';
+		}
+
+		if (action == "failure"){
+			data = (data == '') ? "Failure" : data;
+			data = '<font style="color:#cc0000;font-weight:bold;">' + data + '</font>';
+		}
+
+		ele.innerHTML += data;
+		ele.scrollTop = ele.scrollHeight;
+	},
+	/*
+	Used to build the XenServer Version drop down list based on the downloaded update file
+	*/
+	buildMenu:function(id, data){
+		var select = document.getElementById(id);
+		
+		for (var k in data) {
+			var opt = document.createElement('option');
+			opt.value = k;
+			opt.selected = (k == data.length - 1);
+			opt.innerHTML = data[k].attributes.name;
+			select.appendChild(opt);
+		}
+	},
+	/*
+	Parses the JSON data to get all the patch UUIDs associated with a specific XenServer version.
+	*/
+	getVersionUUIDs:function(data){
+		var name = patcher.json.patchdata.serverversions.version[data].attributes.name;
+		patcher.ver = name;
+		patcher.statusChange("status", "<br>" + name + "<br>");
+		patcher.statusChange("status", "</b><br>Getting patch UUIDs.....");
+
+		try {
+			//console.log(JSON.stringify(patcher.json.patchdata.serverversions.version[data].patch, null, '\t'));
+			data = patcher.json.patchdata.serverversions.version[data].patch;
+			var results = [];
+			for (var k in data){
+				if (k == "attributes"){
+					results.push(data.attributes.uuid);
+					break;
+				} else {
+					results.push(data[k].attributes.uuid);
+				}
+			}
+		} catch(e){
+			patcher.statusChange("status", '', 'failure');
+			return;
+		}
+
+		patcher.statusChange("status", '', 'success');
+		patcher.buildPatchListFromUUIDs(results);
+	},
+	/*
+	Creates a list of objects containing all the patch information per UUID.
+	*/
+	buildPatchListFromUUIDs:function(uuids){
+		patcher.statusChange("status", "<br>Building patch list.....");
+
+		try {
+			patcher.patches = [];
+			var patchSRC = patcher.json.patchdata.patches.patch;
+			for (k in uuids){
+				for (j in patchSRC){
+					if (patchSRC[j].attributes.uuid == uuids[k]){
+						patcher.patches.push(patchSRC[j].attributes);
+						//console.log(JSON.stringify(patchSRC[j].attributes, null, '\t'));
+					}
+				}
+			}
+		} catch(e){
+			patcher.statusChange("status", '', 'failure');
+			return;
+		}
+
+		patcher.step = "stage3";
+		patcher.statusChange("status", '', 'success');
+		//console.log(patcher.patches);
+		document.getElementById('logo').style.display = "none";
+		document.getElementById('well_stage2').style.display = "none";
+		document.getElementById('stages').style.display = "none";
+		document.getElementById('well_stage3').style.display = "block";
+		patcher.buildPatchTable();
+	},
+	/*
+	Displays selected patch information for the patches associated with the selected XenServer version.
+	*/	
+	buildPatchTable:function(){
+		var inject = '<center><table class="table table-striped table-hover" style="background-Color:white;">';
+		inject += '<thead><tr><th>description</th><th>id</th><th>release date</th><th>url</th></tr></thead>'; 
+		inject += '<tbody>';
+		
+		for (k in patcher.patches){
+			inject += '<tr>';
+			for (j in patcher.patches[k]){
+				if (j == "name-label" || j == "name-description" || j == "timestamp" || j == "url"){
+					var dataVal = (j == "timestamp") ? patcher.patches[k][j].split('T')[0] : (j == "url") ? '<a href="javascript:patcher.winOpen(\'' + patcher.patches[k][j] + '\')">notes</a>' : patcher.patches[k][j];
+					inject += '<td>&nbsp;' + dataVal + "</td>";
+				}
+			}
+			inject += "</tr>";
+		}
+		
+		inject += '</tbody></table></center>';
+		document.getElementById('patchTable').innerHTML = inject;
+	},
+	/*
+	Opens a window. I can't believe you are reading the documentation for this.
+	*/	
+	winOpen:function(url){
+		window.open(url);
+	},
+	/*
+	Queues the wget (download) commands so long as the patch has an associated url to download
+	*/	
+	queueDownloads:function(){
+		for (k in patcher.patches){
+			if (patcher.patches[k]['patch-url']){
+				var cmd = 'wget\\wget.exe ' + patcher.patches[k]['patch-url'] + ' -P "' + patcher.dest + patcher.ver + '" -N';
+				patcher.queue.push(cmd);
+				//console.log(cmd);
+			}
+		}
+	},
+	/*
+	Queues the 7zip (unarchive) commands so long as the patch has an associated url. Since unarchiving is a time consuming process it will only do it if the unarchived files are not found or if the zip file was new/updated from the download server.
+	*/	
+	queueUnarchive:function(){
+		for (k in patcher.patches){
+			if (patcher.patches[k]['patch-url']){
+				var url = patcher.patches[k]['patch-url'].split('/');
+				var name = url.pop();
+
+				if (!patcher.fileExist(patcher.dest + patcher.ver + "\\" + name) || patcher.queueData.unzipneeded[k]){
+					var cmd = '7z\\7za.exe e "' + patcher.dest + patcher.ver + "\\" + name + '" -o"' + patcher.dest + patcher.ver + '\\" -y';
+					patcher.queue.push(cmd);
+					//console.log(cmd);
+				} 
+			}
+		}
+	},
+	/*
+	Queues the xe (patch-upload) of the patches to the server so long as they have an associated url to download.
+	*/
+	queuePatchUpload:function(){
+		for (k in patcher.patches){
+			if (patcher.patches[k]['patch-url']){
+				var cmd = 'xe\\xe.exe patch-upload ' + patcher.credentials.string + ' file-name="' + patcher.dest + patcher.ver + "\\" + patcher.patches[k]['name-label'] + '.xsupdate"';
+				patcher.queue.push(cmd);
+				console.log(cmd);
+			}
+		}	
+	},
+	/*
+	Queues the xe (patch-pool-apply) of the patches to the server so long as they have an associated url to download.
+	*/
+	queuePatchInstall:function(){
+		for (k in patcher.patches){
+			if (patcher.patches[k]['patch-url']){
+				var cmd = 'xe\\xe.exe  patch-pool-apply ' + patcher.credentials.string + ' uuid=' + patcher.patches[k]['uuid'];
+				patcher.queue.push(cmd);
+				//console.log(cmd);
+			}
+		}	
+	},
+	/*
+	Queues the xe (patch-list) of the installed patches.
+	*/
+	queuePatchVerify:function(){
+		patcher.buffer = "";
+		cmd = 'xe\\xe.exe patch-list ' + patcher.credentials.string;
+		patcher.runCommand(cmd, true); //true means it will run a test on the returned console data.
+	},
+	/*
+	This will run all the commands in the queue. After it empties the queue it will automatically go to the next stage.
+	*/
+	runQueueCommands:function(){
+		if (patcher.queue.length > 0){
+
+			var cmd = patcher.queue[0];
+			patcher.queue.shift();
+			patcher.runCommand(cmd);
+			patcher.queueData.current++;
+
+			if (patcher.step != "stage5"){
+				var progress = (patcher.queueData.current / patcher.queueData.total) * 100;
+				patcher.progressBar('progressbar', progress, patcher.queueData.current + " of " + patcher.queueData.total);
+			}
+
+			if (patcher.step != "stage9" && patcher.step != "stage8"){
+				patcher.statusChange("progress_status", "Patch" + patcher.queueData.current + ".....");
+			}
+		} else {
+			patcher.nextTask();
+		}
+	},
+	/*
+	This is the code that actually runs the commands. All the output is the run directed to the updateMode and updateIO. If the test parameter is true then the output will be sent to a buffer that will then be tested using the interpretTestResults().
+	*/
+	runCommand:function(cmd, test){
+		var exec = require('child_process').exec;
+
+		patcher.child = exec(cmd, {maxBuffer: 1024 * 1024 * 1024});
+
+		patcher.child.stdout.on('data', function (data) {
+			if (!test){
+				patcher.updateIO(data);
+				patcher.updateMode(data);
+			} else {
+				patcher.buffer += data;
+			}
+		});
+
+		patcher.child.stdin.on('data', function (data) {
+			if (!test){
+				patcher.updateIO(data);
+				patcher.updateMode(data);
+			} else {patcher.buffer += data;
+			}
+		});
+
+		patcher.child.stderr.on('data', function (data) {
+			if (!test){
+				patcher.updateIO(data);
+				patcher.updateMode(data);
+			} else {patcher.buffer += data;
+			}
+		});
+
+		patcher.child.on('close', function (data) {
+			if (!test){
+				setTimeout("patcher.runQueueCommands();", 500);
+			} else {
+				patcher.buffer += data;
+				patcher.interpretTestResults();
+			}
+		});
+	},
+	/*
+	Updates any progress bar with the percent complete and the text to display.
+	*/
+	progressBar:function(id, progress, txt){
+		var ele = document.getElementById(id);
+		ele.setAttribute("aria-valuenow", progress);
+		ele.style.width = progress + "%";
+		ele.innerHTML = txt;
+	},
+	/*
+	Just a quick reset to a progress bar
+	*/
+	resetProgress:function(id){
+		var ele = document.getElementById(id);
+		ele.setAttribute("aria-valuenow", 0);
+		ele.style.width = "0%";
+		ele.innerHTML = "";	
+	},
+	/*
+	This receives all output from the executed commands and parses it based on the current stage.
+	*/
+	updateMode:function(data, flag){
+		//console.log(patcher.step)
+		if (patcher.step == "stage5"){
+			if (patcher.strContains(data, "not retrieving")){
+				patcher.statusChange("progress_status", "Success [Already Downloaded]<br>", "success");
+				patcher.queueData.unzipneeded.push(false);
+			} else if (patcher.strContains(data, "unable to resolve")){
+				patcher.statusChange("progress_status", "Host unresolvable<br>", "failure");
+			} else if (patcher.strContains(data, "Not Found")){
+				patcher.statusChange("progress_status", "Not Found<br>", "failure");
+			} else if (patcher.strContains(data, "saved")){
+				patcher.statusChange("progress_status", "Success<br>", "success");
+				patcher.queueData.unzipneeded.push(true);
+			} 
+
+			if (patcher.strContains(data, "%")){
+				var progress = data.split('%')[0].slice(-3);
+				patcher.progressBar('progressbar', progress, progress + "%");
+			}
+		} else if (patcher.step == "stage6"){
+			if (patcher.strContains(data, "Everything is Ok")){
+				patcher.statusChange("progress_status", "Success<br>", "success");
+			} else {
+				patcher.statusChange("progress_status", "Failure<br>", "failure");
+			}
+		} else if (patcher.step == "stage7"){
+			if (patcher.strContains(data, "-")){
+				patcher.statusChange("progress_status", "Success<br>", "success");
+			}
+		} else if (patcher.step == "stage8"){
+
+		} 
+	},
+	/*
+	This receives all output from the executed commands and writes to a textarea.
+	*/
+	updateIO:function(data){
+		var ele = document.getElementById('iostatus');
+		ele.value += data + "\r\n";
+		ele.scrollTop = ele.scrollHeight;
+		//console.log(data);
+	},
+	/*
+	Checks if a string contains another string
+	*/
+	strContains:function(txt, search){
+		return (txt.indexOf(search) > -1);
+	},
+	/*
+	Write a file to the local disk
+	*/
+	writeFile:function(name, data){
+		var fs = require('fs');
+		fs.writeFileSync(name, data);
+	},
+	/*
+	Read a file from the local disk
+	*/
+	readFile:function(name){
+		var fs = require('fs');
+		return fs.readFileSync(name, 'utf8');
+	},
+	/*
+	Check if a file exists
+	*/
+	fileExist:function(path){
+		path = path.split(".zip")[0] + ".xsupdate";
+		var fs = require('fs');
+		try {
+			var stats = fs.lstatSync(path);
+			if (stats.isFile()) {
+				return true;
+			}
+		} catch (e){
+			return false;
+		}
+	},
+	/*
+	This sets up the test that verifies the server ip, username, password are valid.
+	*/
+	testServer:function(){
+		if (patcher.validateCredentials()){
+			patcher.buffer = "";
+			var cmd = 'xe\\xe.exe host-list ' + patcher.credentials.string;
+			patcher.runCommand(cmd, true);
+			patcher.statusChange("status", "<br>XenServer connection.....");	
+		}
+	},
+	/*
+	This reads the buffer and runs tests against it to determine if a command executed properly. This only runs when the test parameter is set to true on the runCommand() method
+	*/
+	interpretTestResults:function(){
+		if (patcher.step == "stage1b"){
+			if (patcher.strContains(patcher.buffer, "failed")){
+				patcher.statusChange("status", "Authentication Failed", 'failure');
+				return;
+			}
+			if (patcher.strContains(patcher.buffer, "Error")){
+				patcher.statusChange("status", "Connection Refused", 'failure');
+				return;
+			}
+
+			patcher.statusChange("status", "", 'success');
+			patcher.step = "stage2";
+			patcher.statusChange("status", "<br><br><b>Select your XenServer Version: </b>");
+			document.getElementById('well_stage1').style.display = "none";
+			document.getElementById('well_stage2').style.display = "block";		
+		} else if (patcher.step == "stage9"){
+			console.log("Called");
+			for (k in patcher.patches){
+				var count = parseInt(k) + 1;
+				if (patcher.patches[k]['name-label']){
+
+					patcher.statusChange("progress_status", "Patch" + count + ".....");
+
+					var progress = (count / patcher.patches.length) * 100;
+					patcher.progressBar('progressbar', progress, count + " of " + patcher.patches.length);
+
+					var result = (patcher.strContains(patcher.buffer, patcher.patches[k]['name-label'])) ? "success" : "failure";
+					patcher.statusChange("progress_status", "", result);
+					patcher.statusChange("progress_status", "<br>");
+				}
+			}
+		}
+	}
+};
+</script>
+<body onload="patcher.ini()">
+<br>
+<div class="container-fluid">
+	<div class="well" id="logo" style="display:none;"><center><h1>XenserverPatcher</h1></center></div>
+
+	<div class="row" id="stages">
+		<div class="col-xs-6">
+			<div class="well" id="well_stage1">
+				<b>XenServer Credentials</b><br><br>
+				<div class="form-group input-group">
+					<span class="input-group-addon">&nbsp;&nbsp;server-ip:</span>
+					<input id="serverIP" type="text" class="form-control" style="width:200px;">
+				</div>
+				<div class="form-group input-group">
+					<span class="input-group-addon">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;port:</span>
+					<input id="serverPort" type="text" class="form-control" style="width:200px;">
+				</div>
+				<div class="form-group input-group">
+					<span class="input-group-addon">username:</span>
+					<input id="serverUser" type="text" class="form-control" style="width:200px;">
+				</div>
+				<div class="form-group input-group">
+					<span class="input-group-addon">&nbsp;password:</span>
+					<input id="serverPassword" type="password" class="form-control" style="width:200px;">
+				</div>
+
+				<input type="button" class="form-control" value="Next" style="width:150px;" onclick="patcher.nextTask();">
+			</div>
+
+			<div class="well" id="well_stage2" style="display:none;">
+				<b>Xenserver Version</b><br><br>
+				<div class="form-group input-group">
+					<span class="input-group-addon">version:</span>
+					<select id="version" class="form-control"></select>
+				</div>
+				<div class="form-group input-group">
+				<input type="button" class="form-control" value="Back" style="width:150px;" onclick="patcher.prevTask();">
+				<input type="button" class="form-control" value="Next" style="width:150px;" onclick="patcher.nextTask();">
+				</div>
+			</div>
+
+			<div class="well" id="well_stage4" style="display:none;">
+				<b>Patch Download Location</b><br><br>
+				<div class="form-group input-group">
+					<span class="input-group-addon">location:</span>
+					<input type="text" id="patchrepo" class="form-control">
+				</div>
+				<div class="form-group input-group">
+				<input type="button" class="form-control" value="Back" style="width:150px;" onclick="patcher.prevTask();">
+				<input type="button" class="form-control" value="Start Patcher" style="width:150px;" onclick="patcher.nextTask();">
+				</div>
+			</div>
+
+			<div class="well" id="well_stage5" style="display:none;word-wrap:break-word;height:340px;max-height:340px;overflow-y:scroll;">
+				<b><span id="queue_title"></span></b><br><br>
+					<div class="progress">
+						<div class="progress-bar progress-bar-info progress-bar-striped active" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width:0%" id="progressbar"></div>
+					</div>
+					<span id="progress_status"></span><br>
+				<div class="form-group input-group">
+				<input type="button" class="form-control" value="Back" style="width:150px;display:none;" onclick="patcher.prevTask();">
+				<input type="button" class="form-control" value="Next" style="width:150px;display:none;" onclick="patcher.nextTask();">
+				</div>
+			</div>
+		</div>
+
+		<div class="col-xs-6">
+			<div class="well" style="word-wrap:break-word;height:100%;max-height:340px;overflow-y:scroll;" id="status"></div>
+		</div>
+	</div>
+
+	<div class="row" id="well_stage3" style="display:none;">
+		<div class="col-xs-12">
+			<div class="well">
+				<b>Available Xenserver Patches</b><br><br>
+				<span id="patchTable"></span>
+				<div class="form-group input-group">
+				<input type="button" class="form-control" value="Back" style="width:150px;" onclick="patcher.prevTask();">
+				<input type="button" class="form-control" value="Next" style="width:150px;" onclick="patcher.nextTask();">
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row" id="well_io" style="display:none;">
+		<div class="col-xs-12">
+			<div class="well">
+				<textarea id="iostatus" style="width:100%;height:120px;"></textarea>
+			</div>
+		</div>
+	</div>
+
+</div>
+
+<span style="font-size:10px;color:#c0c0c0;" id="credits">
+Created by 2Lt Gavin Delphia in 2014-2015
+</span>
+
+</body>
+</html>

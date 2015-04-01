@@ -1,0 +1,18 @@
+{
+  "main": "app.html",
+  "name": "XenPatcher",
+  "description": "Patches a XenServer",
+  "version": "1.0.0",
+  "window": {
+    "title": "XenPatcher",
+    "icon": "icon.png",
+    "toolbar": false,
+    "frame": true,
+    "width": 900,
+    "height": 400,
+    "position": "center",
+    "min_width": 900,
+    "min_height": 400,
+    "resizable": true
+  }
+}

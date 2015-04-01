@@ -1,0 +1,1 @@
+xe.exe -s [ip] -u [user] -pw [password] help --all > cmdlist.txt
